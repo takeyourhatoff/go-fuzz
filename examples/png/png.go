@@ -5,12 +5,61 @@ package png
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"hash/crc32"
 	"image/png"
+	"io"
 	"reflect"
 )
 
+func fixChecksums(data []byte) ([]byte, error) {
+	if len(data) < 8 {
+		return nil, errors.New("data too short")
+	}
+	var buf bytes.Buffer
+	buf.Write(data[:8])
+	r := bytes.NewReader(data[8:])
+	for {
+		chunk, err := readChunk(r)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		binary.Write(&buf, binary.BigEndian, uint32(len(chunk)-4))
+		buf.Write(chunk)
+		binary.Write(&buf, binary.BigEndian, crc32.ChecksumIEEE(chunk))
+		r.Seek(4, io.SeekCurrent)
+	}
+	return buf.Bytes(), nil
+}
+
+func readChunk(r io.Reader) ([]byte, error) {
+	var length uint32
+	err := binary.Read(r, binary.BigEndian, &length)
+	if err != nil {
+		return nil, err
+	}
+	length += 4 // Chunk type code not included in length
+	if length > 1<<20 {
+		return nil, errors.New("chunk too big")
+	}
+	buf := make([]byte, int(length))
+	_, err = io.ReadFull(r, buf)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	return buf, err
+}
+
 func Fuzz(data []byte) int {
+	data, err := fixChecksums(data)
+	if err != nil {
+		return 0
+	}
 	cfg, err := png.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return 0
